@@ -1,14 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createClient } from "@supabase/supabase-js";
 
 /* ═══════════════════════════════════════════════
-   LOVE SITE — Tam Sürüm
-   localStorage tabanlı, şifreli, romantik
+   LOVE SITE — Supabase Sürümü
+   Gerçek veritabanı, her cihazdan erişim
 ═══════════════════════════════════════════════ */
 
-const STORAGE_KEY  = "lovesite:data:v4";
-const USERS_KEY    = "lovesite:users:v4";
-const AUTH_KEY     = "lovesite:auth:v4";
-const SESSION_KEY  = "lovesite:session:v4";
+const SUPABASE_URL  = "https://wxvxslhtltwbxklqjdti.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind4dnhzbGh0bHR3YnhrbHFqZHRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMzNjEzNjksImV4cCI6MjA4ODkzNzM2OX0.qVczjS2y68c-YLWJXhGt14Gmwq8uZquJj7kYFWG0nhw";
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+const AUTH_KEY = "lovesite:auth:v5"; // session cache only
 
 const uid      = () => Math.random().toString(36).slice(2, 10);
 const nowISO   = () => new Date().toISOString();
@@ -36,6 +38,30 @@ function fileToDataURL(file) {
   });
 }
 
+/* Supabase helpers */
+async function dbGetData() {
+  const { data, error } = await sb.from("site_data").select("data").eq("id","main").single();
+  if (error) { console.error("dbGetData", error); return null; }
+  return data?.data || null;
+}
+async function dbSetData(payload) {
+  const { error } = await sb.from("site_data").upsert({ id:"main", data: payload, updated_at: nowISO() });
+  if (error) console.error("dbSetData", error);
+}
+async function dbGetUsers() {
+  const { data, error } = await sb.from("users").select("*");
+  if (error) { console.error("dbGetUsers", error); return []; }
+  return data || [];
+}
+async function dbUpsertUser(u) {
+  const { error } = await sb.from("users").upsert(u);
+  if (error) console.error("dbUpsertUser", error);
+}
+async function dbDeleteUser(id) {
+  const { error } = await sb.from("users").delete().eq("id", id);
+  if (error) console.error("dbDeleteUser", error);
+}
+
 /* ── DEFAULT DATA ── */
 const DEFAULT_DATA = {
   meta: {
@@ -52,10 +78,9 @@ const DEFAULT_DATA = {
   stories: [],
   photos: [],
   timeline: [],
-  drawings: [],
   movies: [],
   music: [],
-  games: { memory: [], wordSearch: [], puzzle: [] }
+  games: { puzzle: [] }
 };
 
 /* ══════════════════════════════════════════════════
@@ -1551,7 +1576,7 @@ function PuzzleModal({ puzzle, onClose }) {
 /* ══════════════════════════════════════════════════
    SETTINGS / ADMIN PANEL
 ══════════════════════════════════════════════════ */
-function SettingsSection({ data, setData, users, setUsers, auth, addItem }) {
+function SettingsSection({ data, setData, users, setUsers, auth, addItem, addUserAdmin, removeUserAdmin }) {
   const [title, setTitle]       = useState(data.meta.title);
   const [subtitle, setSub]      = useState(data.meta.subtitle);
   const [welcome, setWelcome]   = useState(data.meta.welcome);
@@ -1568,17 +1593,15 @@ function SettingsSection({ data, setData, users, setUsers, auth, addItem }) {
     alert("Kaydedildi ✓");
   }
 
-  function addUser() {
+  async function addUser() {
     if (!newEmail||!newPass) { alert("E-posta ve şifre gir"); return; }
-    if (users.find(u=>u.email===newEmail)) { alert("Bu e-posta zaten kayıtlı"); return; }
-    const u = { id:uid(), email:newEmail, name:newName||newEmail.split("@")[0], hash:hashStr(newPass), isAdmin:false, active:true, createdAt:nowISO() };
-    setUsers(prev=>[...prev,u]);
+    const ok = await addUserAdmin(newEmail.trim(), newPass, newName.trim());
+    if (!ok) { alert("Bu e-posta zaten kayıtlı veya hata oluştu"); return; }
     alert("Kullanıcı eklendi ✓"); setNE(""); setNP(""); setNN("");
   }
 
   function removeUser(id) {
-    if (!window.confirm("Silinsin mi?")) return;
-    setUsers(prev=>prev.filter(u=>u.id!==id));
+    removeUserAdmin(id);
   }
 
   async function addMusic(e) {
@@ -1672,7 +1695,7 @@ function SettingsSection({ data, setData, users, setUsers, auth, addItem }) {
                   <div key={u.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 14px", background:"#f9f5f7", borderRadius:10, marginBottom:8 }}>
                     <div>
                       <div style={{ fontWeight:700 }}>{u.name} <span style={{ fontWeight:400, color:"#888", fontSize:"0.85rem" }}>({u.email})</span></div>
-                      <div style={{ fontSize:"0.78rem", color:"#aaa" }}>{u.isAdmin ? "👑 Admin" : "👤 Kullanıcı"} · {fmtShort(u.createdAt)}</div>
+                      <div style={{ fontSize:"0.78rem", color:"#aaa" }}>{u.is_admin ? "👑 Admin" : "👤 Kullanıcı"} · {fmtShort(u.created_at||u.createdAt)}</div>
                     </div>
                     {u.email!==auth.email && <button className="btn sm danger" onClick={()=>removeUser(u.id)}>Kaldır</button>}
                   </div>
@@ -1730,118 +1753,163 @@ function SettingsSection({ data, setData, users, setUsers, auth, addItem }) {
    MAIN APP
 ══════════════════════════════════════════════════ */
 export default function App() {
-  const [data, setData] = useState(() => {
-    const stored = safeLoad(STORAGE_KEY, null);
-    if (!stored) { safeSave(STORAGE_KEY, DEFAULT_DATA); return DEFAULT_DATA; }
-    // Merge
-    const merged = { ...DEFAULT_DATA, ...stored };
-    merged.meta = { ...DEFAULT_DATA.meta, ...(stored.meta||{}) };
-    merged.games = { ...DEFAULT_DATA.games, ...(stored.games||{}) };
-    if (!Array.isArray(merged.videos)) merged.videos = [];
-    if (!Array.isArray(merged.poems)) merged.poems = [];
-    if (!Array.isArray(merged.letters)) merged.letters = [];
-    if (!Array.isArray(merged.stories)) merged.stories = [];
-    if (!Array.isArray(merged.photos)) merged.photos = [];
-    if (!Array.isArray(merged.timeline)) merged.timeline = [];
-    if (!Array.isArray(merged.drawings)) merged.drawings = [];
-    if (!Array.isArray(merged.movies)) merged.movies = [];
-    if (!Array.isArray(merged.music)) merged.music = [];
-    if (!Array.isArray(merged.games.puzzle)) merged.games.puzzle = [];
-    return merged;
-  });
-
-  const [users, setUsers] = useState(()=>safeLoad(USERS_KEY,[]));
-  const [auth, setAuth]   = useState(()=>safeLoad(AUTH_KEY,{ email:null, isAdmin:false, name:"" }));
+  const [data, setData]       = useState(DEFAULT_DATA);
+  const [users, setUsers]     = useState([]);
+  const [auth, setAuth]       = useState(() => safeLoad(AUTH_KEY, { email:null, isAdmin:false, name:"" }));
   const [section, setSection] = useState("home");
+  const [loading, setLoading] = useState(true);
   const audioRef  = useRef(null);
   const [playing, setPlaying] = useState(false);
 
-  // Persist
-  useEffect(()=>safeSave(STORAGE_KEY, data), [data]);
-  useEffect(()=>safeSave(USERS_KEY, users), [users]);
-  useEffect(()=>safeSave(AUTH_KEY, auth), [auth]);
+  /* ── initial load from Supabase ── */
+  useEffect(() => {
+    async function init() {
+      setLoading(true);
+      // Load site data
+      const remoteData = await dbGetData();
+      if (remoteData) {
+        const merged = { ...DEFAULT_DATA, ...remoteData };
+        merged.meta  = { ...DEFAULT_DATA.meta,  ...(remoteData.meta  || {}) };
+        merged.games = { ...DEFAULT_DATA.games, ...(remoteData.games || {}) };
+        ["videos","poems","letters","stories","photos","timeline","movies","music"].forEach(k => {
+          if (!Array.isArray(merged[k])) merged[k] = [];
+        });
+        if (!Array.isArray(merged.games.puzzle)) merged.games.puzzle = [];
+        setData(merged);
+      }
+      // Load users
+      const remoteUsers = await dbGetUsers();
+      setUsers(remoteUsers);
+      setLoading(false);
+    }
+    init();
+  }, []);
 
-  function registerOwner(email, pass, name) {
-    if (users.find(u=>u.email===email)) return false;
-    const u = { id:uid(), email, name:name||email.split("@")[0], hash:hashStr(pass), isAdmin:true, active:true, createdAt:nowISO() };
-    const nu = [...users, u];
-    setUsers(nu); safeSave(USERS_KEY, nu);
-    setAuth({ email:u.email, isAdmin:true, name:u.name }); safeSave(AUTH_KEY, { email:u.email, isAdmin:true, name:u.name });
-    return true;
-  }
+  /* ── auth: validate cached session against db users ── */
+  useEffect(() => {
+    if (loading) return;
+    if (auth.email && users.length > 0) {
+      const still = users.find(u => u.email === auth.email);
+      if (!still) { setAuth({ email:null, isAdmin:false, name:"" }); safeSave(AUTH_KEY, {}); }
+    }
+  }, [loading, users]);
 
-  function login(email, pass) {
-    const u = users.find(x=>x.email===email);
-    if (!u || u.hash!==hashStr(pass)) return false;
-    const a = { email:u.email, isAdmin:!!u.isAdmin, name:u.name };
+  async function registerOwner(email, pass, name) {
+    const existing = await dbGetUsers();
+    if (existing.find(u => u.email === email)) return false;
+    const u = { id:uid(), email, name:name||email.split("@")[0], hash:hashStr(pass), is_admin:existing.length===0, created_at:nowISO() };
+    await dbUpsertUser(u);
+    const nu = [...existing, u];
+    setUsers(nu);
+    const a = { email:u.email, isAdmin:u.is_admin, name:u.name };
     setAuth(a); safeSave(AUTH_KEY, a);
     return true;
   }
 
-  function logout() { setAuth({ email:null, isAdmin:false, name:"" }); setSection("home"); }
+  async function login(email, pass) {
+    const fresh = await dbGetUsers();
+    setUsers(fresh);
+    const u = fresh.find(x => x.email === email);
+    if (!u || u.hash !== hashStr(pass)) return false;
+    const a = { email:u.email, isAdmin:!!u.is_admin, name:u.name };
+    setAuth(a); safeSave(AUTH_KEY, a);
+    return true;
+  }
 
-  // Persist setData wrapper
+  function logout() {
+    setAuth({ email:null, isAdmin:false, name:"" });
+    safeSave(AUTH_KEY, {});
+    setSection("home");
+  }
+
+  /* ── persistSet: update state AND push to Supabase ── */
   const persistSet = useCallback((fn) => {
     setData(prev => {
-      const next = typeof fn==="function" ? fn(prev) : fn;
-      safeSave(STORAGE_KEY, next);
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      dbSetData(next); // async, fire-and-forget
       return next;
     });
   }, []);
 
-  // addItem helper — supports dot paths like "games.puzzle"
   function addItem(path, item) {
     persistSet(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
       const parts = path.split(".");
       let cur = copy;
-      for (let i=0;i<parts.length-1;i++) cur = cur[parts[i]];
+      for (let i = 0; i < parts.length-1; i++) cur = cur[parts[i]];
       const key = parts[parts.length-1];
-      if (!Array.isArray(cur[key])) cur[key]=[];
+      if (!Array.isArray(cur[key])) cur[key] = [];
       cur[key].push(item);
       return copy;
     });
   }
 
-  // updateItem — finds by id and merges
   function updateItem(path, id, patch) {
     persistSet(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
       const parts = path.split(".");
       let cur = copy;
-      for (let i=0;i<parts.length-1;i++) cur = cur[parts[i]];
+      for (let i = 0; i < parts.length-1; i++) cur = cur[parts[i]];
       const arr = cur[parts[parts.length-1]];
-      const idx = arr.findIndex(x=>x.id===id);
-      if (idx!==-1) arr[idx] = typeof patch==="object" ? patch : { ...arr[idx], ...patch };
+      const idx = arr.findIndex(x => x.id === id);
+      if (idx !== -1) arr[idx] = typeof patch === "object" ? patch : { ...arr[idx], ...patch };
       return copy;
     });
   }
 
-  // deleteItem — no confirm dialog (blocks React updates), caller can confirm inline
   function deleteItem(path, id) {
     persistSet(prev => {
       const copy = JSON.parse(JSON.stringify(prev));
       const parts = path.split(".");
       let cur = copy;
-      for (let i=0;i<parts.length-1;i++) cur = cur[parts[i]];
+      for (let i = 0; i < parts.length-1; i++) cur = cur[parts[i]];
       const key = parts[parts.length-1];
-      cur[key] = (cur[key]||[]).filter(x=>x.id!==id);
+      cur[key] = (cur[key]||[]).filter(x => x.id !== id);
       return copy;
     });
   }
 
-  // Music
+  /* ── user management (admin) ── */
+  async function addUserAdmin(email, pass, name) {
+    if (!email || !pass) return false;
+    if (users.find(u => u.email === email)) return false;
+    const u = { id:uid(), email, name:name||email.split("@")[0], hash:hashStr(pass), is_admin:false, created_at:nowISO() };
+    await dbUpsertUser(u);
+    setUsers(prev => [...prev, u]);
+    return true;
+  }
+
+  async function removeUserAdmin(id) {
+    await dbDeleteUser(id);
+    setUsers(prev => prev.filter(u => u.id !== id));
+  }
+
+  /* ── music ── */
   function playRandom() {
-    const music = data.music||[];
+    const music = data.music || [];
     if (!music.length) { alert("Henüz müzik yok. Ayarlar > Müzik'ten ekle."); return; }
-    const s = music[Math.floor(Math.random()*music.length)].src;
-    if (audioRef.current) { audioRef.current.src=s; audioRef.current.play().then(()=>setPlaying(true)).catch(()=>{}); }
+    const s = music[Math.floor(Math.random() * music.length)].src;
+    if (audioRef.current) { audioRef.current.src = s; audioRef.current.play().then(() => setPlaying(true)).catch(() => {}); }
   }
   function togglePlay() {
     if (!audioRef.current) return;
-    if (playing) { audioRef.current.pause(); setPlaying(false); } else { audioRef.current.play().then(()=>setPlaying(true)).catch(()=>{}); }
+    if (playing) { audioRef.current.pause(); setPlaying(false); }
+    else { audioRef.current.play().then(() => setPlaying(true)).catch(() => {}); }
   }
 
+  /* ── loading screen ── */
+  if (loading) return (
+    <>
+      <GlobalStyle />
+      <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", background:"linear-gradient(160deg,#ff5b6b,#ff2d55)" }}>
+        <div style={{ fontSize:60, animation:"heartbeat 0.8s ease-in-out infinite" }}>❤️</div>
+        <div style={{ marginTop:20, fontFamily:"'Dancing Script',cursive", fontSize:"1.6rem", color:"white" }}>Yükleniyor...</div>
+        <div style={{ marginTop:8, color:"rgba(255,255,255,0.7)", fontSize:"0.9rem" }}>Veriler alınıyor</div>
+      </div>
+    </>
+  );
+
+  /* ── login screen ── */
   if (!auth.email) return (
     <>
       <GlobalStyle />
@@ -1849,14 +1917,18 @@ export default function App() {
     </>
   );
 
-  const props = { data, addItem, updateItem, deleteItem, auth, setData:persistSet, users, setUsers };
+  const props = { data, addItem, updateItem, deleteItem, auth,
+    setData: persistSet, users, setUsers,
+    addUserAdmin, removeUserAdmin };
 
   return (
     <>
       <GlobalStyle />
       <PetalBg />
       <audio ref={audioRef} onEnded={playRandom} />
-      <Header meta={data.meta} auth={auth} onLogout={logout} playing={playing} onPlayToggle={togglePlay} onPlayRandom={playRandom} setSection={setSection} currentSection={section} />
+      <Header meta={data.meta} auth={auth} onLogout={logout} playing={playing}
+        onPlayToggle={togglePlay} onPlayRandom={playRandom}
+        setSection={setSection} currentSection={section} />
       <main style={{ position:"relative", zIndex:1 }}>
         {section==="home"     && <div className="section-wrap"><HomeGrid meta={data.meta} setSection={setSection} /></div>}
         {section==="videos"   && <VideosSection   {...props} />}
